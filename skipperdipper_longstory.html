@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<title>SkipperDipper — Vermisst in Neonstadt (Long Story Demo)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  html,body { height:100%; margin:0; background:#0b0f1a; color:#e6eef8; font-family: "Segoe UI", Roboto, Arial, sans-serif; }
+  #game-container { width:100%; height:100vh; overflow:hidden; }
+  #notes { position:fixed; right:12px; top:12px; width:300px; max-height:80vh; overflow:auto; background:rgba(10,10,20,0.7); padding:10px; border-radius:8px; font-size:13px; display:none; z-index:9999; }
+  #notes h3 { margin:0 0 6px 0; font-size:15px; }
+  .clue-item { padding:6px; border-bottom:1px solid rgba(255,255,255,0.04); cursor:pointer; }
+  .smallhint { font-size:12px; color:#9fb1c8; margin-top:6px; }
+</style>
+</head>
+<body>
+<div id="game-container"></div>
+<div id="notes">
+  <h3>Inventar & Hinweise (I drücken zum Schließen)</h3>
+  <div id="cluesList"></div>
+  <div class="smallhint">Klicke einen Hinweis um die Beschreibung zu sehen.</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.55.2/dist/phaser.min.js"></script>
+<script>
+/*
+  SkipperDipper — Long Story Version
+  - 6 Kapitel/Orte (Wohnung, Nachtmarkt, Jazz-Club, Archiv, Untergrund, Finale)
+  - 30 Hinweise (müssen alle gesammelt werden, um Lina zu retten)
+  - Perspektivwechsel Top-Down <-> Side an Zonen
+  - Sprechblasen, Inventar-UI, NPC-Dialoge
+  - Platzhalter-Grafiken (programmatisch)
+*/
+
+const config = {
+  type: Phaser.AUTO,
+  parent: 'game-container',
+  width: 1000,
+  height: 640,
+  backgroundColor: '#08101a',
+  physics: {
+    default: 'arcade',
+    arcade: { gravity: { y: 900 }, debug: false }
+  },
+  scene: [PreloadScene, MainScene]
+};
+
+new Phaser.Game(config);
+
+/* ---------------- PreloadScene ---------------- */
+function PreloadScene() {
+  Phaser.Scene.call(this, { key: 'PreloadScene' });
+}
+PreloadScene.prototype = Object.create(Phaser.Scene.prototype);
+PreloadScene.prototype.constructor = PreloadScene;
+PreloadScene.prototype.preload = function() {
+  // no external assets; we'll draw placeholders in create()
+};
+PreloadScene.prototype.create = function() {
+  const g = this.add.graphics();
+
+  // Player Top-down placeholder
+  g.fillStyle(0x2b6b8a,1).fillRoundedRect(0,0,48,48,8);
+  g.lineStyle(2,0xffffff).strokeRoundedRect(0,0,48,48,8);
+  g.generateTexture('player_top',48,48);
+  g.clear();
+
+  // Player Side placeholder
+  g.fillStyle(0x2b6b8a,1).fillRoundedRect(0,0,40,56,8);
+  g.lineStyle(2,0xffffff).strokeRoundedRect(0,0,40,56,8);
+  g.generateTexture('player_side',40,56);
+  g.clear();
+
+  // NPC placeholder
+  g.fillStyle(0xb85e9e,1).fillRoundedRect(0,0,40,48,6);
+  g.lineStyle(2,0xffffff).strokeRoundedRect(0,0,40,48,6);
+  g.generateTexture('npc',40,48);
+  g.clear();
+
+  // Clue icon
+  g.fillStyle(0xf6c85f,1).fillCircle(12,12,12);
+  g.lineStyle(2,0x222831).strokeCircle(12,12,12);
+  g.generateTexture('clue',24,24);
+  g.clear();
+
+  // Door / final door
+  g.fillStyle(0x2f3948,1).fillRoundedRect(0,0,120,200,8);
+  g.lineStyle(3,0xffffff).strokeRoundedRect(0,0,120,200,8);
+  g.generateTexture('door',120,200);
+  g.clear();
+
+  // Platform tile
+  g.fillStyle(0x2f4f63,1).fillRect(0,0,240,32);
+  g.generateTexture('platform',240,32);
+  g.clear();
+
+  this.scene.start('MainScene');
+};
+
+/* ---------------- MainScene ---------------- */
+function MainScene() {
+  Phaser.Scene.call(this, { key: 'MainScene' });
+}
+MainScene.prototype = Object.create(Phaser.Scene.prototype);
+MainScene.prototype.constructor = MainScene;
+
+MainScene.prototype.create = function() {
+  // Game state
+  this.mode = 'top'; // 'top' or 'side'
+  this.cluesFound = 0;
+  this.requiredClues = 30;
+  this.collected = {}; // map id->true
+  this.currentZone = 'Wohnung'; // initial location
+  this.inSwitchZone = false;
+
+  // Create large world (single canvas with zones)
+  this.cameras.main.setBackgroundColor(0x07121a);
+  this.cameras.main.setZoom(1);
+
+  // Create world groups
+  this.topGroup = this.add.group();
+  this.sideGroup = this.add.group();
+
+  // Create rooms/zones rectangles (visual guides)
+  // We'll place six zones horizontally to walk through (for top view) - but also allow side sections
+  this.zones = {
+    'Wohnung': { x:120, y:320, w:380, h:380, mode:'side' },
+    'Nachtmarkt': { x:520, y:160, w:600, h:360, mode:'top' },
+    'JazzClub': { x:1140, y:320, w:420, h:380, mode:'side' },
+    'Archiv': { x:1700, y:160, w:680, h:360, mode:'top' },
+    'Untergrund': { x:2340, y:320, w:540, h:380, mode:'side' },
+    'Finale': { x:2940, y:260, w:420, h:460, mode:'side' }
+  };
+
+  // Visual zone backgrounds (subtle)
+  for (const [name, z] of Object.entries(this.zones)) {
+    const rect = this.add.rectangle(z.x, z.y, z.w, z.h, 0x0f2430).setAlpha(0.35);
+    const label = this.add.text(z.x - z.w/2 + 8, z.y - z.h/2 + 8, name, { fontSize:'16px', color:'#cfe8ff' });
+    rect.setDepth(-1);
+  }
+
+  // Player
+  this.player = this.physics.add.sprite(this.zones['Wohnung'].x, this.zones['Wohnung'].y, 'player_side');
+  this.player.setCollideWorldBounds(true);
+  this.player.body.setSize(30,50,true);
+
+  // Camera
+  this.cameras.main.startFollow(this.player, true, 0.08, 0.08);
+  this.cameras.main.setBounds(0,0,3600,800);
+  this.physics.world.setBounds(0,0,3600,800);
+
+  // Platforms for side areas (global group; visible only in side mode)
+  this.platforms = this.physics.add.staticGroup();
+  // create some example platforms in side zones
+  this.createSidePlatforms();
+
+  // Clues data (30 clues) - id, zone, x,y, title, description
+  this.clues = this.createCluesData();
+
+  // Place clue sprites
+  this.clueSprites = {};
+  for (const c of this.clues) {
+    const s = this.physics.add.staticImage(c.x, c.y, 'clue');
+    s.setData('meta', c);
+    s.setVisible(!c.collected);
+    this.clueSprites[c.id] = s;
+  }
+
+  // NPCs with dialogues (some are top, some side)
+  this.npcs = this.createNPCs();
+
+  this.npcSprites = [];
+  for (const n of this.npcs) {
+    const s = this.physics.add.staticImage(n.x, n.y, 'npc');
+    s.setData('meta', n);
+    this.npcSprites.push(s);
+  }
+
+  // Final door (closed until all clues are found)
+  const final = this.zones['Finale'];
+  this.finalDoor = this.physics.add.staticImage(final.x + final.w/2 - 80, final.y + final.h/2 - 60, 'door');
+  this.finalDoor.setData('isLocked', true);
+
+  // Overlaps: player <-> clue, player <-> npc, player <-> final door
+  for (const s of Object.values(this.clueSprites)) {
+    this.physics.add.overlap(this.player, s, (p, obj) => { /* handled by interactive key */ }, null, this);
+  }
+  for (const s of this.npcSprites) {
+    this.physics.add.overlap(this.player, s, (p, obj) => {
+      // show hint to press space
+      this.hintText.setText("Drücke LEER um zu sprechen / Interagieren");
+      this.nearNPC = obj;
+    }, null, this);
+  }
+  this.physics.add.overlap(this.player, this.finalDoor, (p, d) => {
+    this.hintText.setText("Drücke LEER um die Tür zu prüfen");
+    this.nearFinal = d;
+  }, null, this);
+
+  // Input
+  this.cursors = this.input.keyboard.createCursorKeys();
+  this.keyE = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.E);
+  this.keySpace = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+  this.keyI = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.I);
+
+  // UI
+  this.hintText = this.add.text(12,12,"", { fontSize:'18px', color:'#dfe6ef' }).setScrollFactor(0);
+  this.locationText = this.add.text(12,40,"Ort: Wohnung", { fontSize:'18px', color:'#ffd166' }).setScrollFactor(0);
+  this.clueCounter = this.add.text(12,68,`Hinweise: ${this.cluesFound}/${this.requiredClues}`, { fontSize:'16px', color:'#9be7ff' }).setScrollFactor(0);
+
+  // Speech bubble
+  this.bubble = this.add.container(0,0).setDepth(100).setVisible(false);
+
+  // Inventory UI (DOM)
+  this.notesPanel = document.getElementById('notes');
+  this.cluesListDiv = document.getElementById('cluesList');
+  document.addEventListener('keydown', (e) => {
+    if (e.key.toLowerCase() === 'i') {
+      this.toggleInventory();
+    }
+  });
+
+  // initial mode set by initial zone
+  this.applyModeForZone('Wohnung');
+
+  // message
+  this.showSpeech("Ich bin SkipperDipper. Lina Marquart ist verschwunden. Sammle Hinweise, um die Wahrheit zu finden.", 4200);
+};
+
+/* Create side platforms across side zones */
+MainScene.prototype.createSidePlatforms = function() {
+  // Wohnung platforms
+  const w = this.zones['Wohnung'];
+  this.platforms.create(w.x-80, w.y+140, 'platform').setScale(0.8,1).refreshBody();
+  this.platforms.create(w.x+90, w.y+60, 'platform').setScale(0.5,1).refreshBody();
+
+  // JazzClub
+  const j = this.zones['JazzClub'];
+  this.platforms.create(j.x-50, j.y+160, 'platform').setScale(0.9,1).refreshBody();
+  this.platforms.create(j.x+110, j.y+40, 'platform').setScale(0.5,1).refreshBody();
+
+  // Untergrund
+  const u = this.zones['Untergrund'];
+  this.platforms.create(u.x-30, u.y+160, 'platform').setScale(0.9,1).refreshBody();
+  this.platforms.create(u.x+130, u.y+40, 'platform').setScale(0.5,1).refreshBody();
+
+  // Finale area - small platforms
+  const f = this.zones['Finale'];
+  this.platforms.create(f.x+20, f.y+200, 'platform').setScale(0.8,1).refreshBody();
+};
+
+/* Create clues list (30 items) */
+MainScene.prototype.createCluesData = function() {
+  // We'll distribute clues across zones roughly as in the story
+  const list = [];
+  // Wohnung (6)
+  const wohnung = [
+    { id:'c01', zone:'Wohnung', x: 60, y: 340, title:'Kaputter Laptop', desc:'Unvollständige E-Mail an "Projekt Blue Trace".' },
+    { id:'c02', zone:'Wohnung', x: 160, y: 280, title:'Markierter Kalender', desc:'21:00 Uhr - Die Brücke' },
+    { id:'c03', zone:'Wohnung', x: 200, y: 380, title:'Foto mit zwei Männern', desc:'Rückseite: "Nachtmarkt · 7. Bezirk".' },
+    { id:'c04', zone:'Wohnung', x: 100, y: 420, title:'Streichholzbrief', desc:'Streichholzbrief vom Jazz-Club "The Velvet Pulse".' },
+    { id:'c05', zone:'Wohnung', x: 220, y: 320, title:'Leerumschlag', desc:'Absender: Stadtarchiv, Sektion B17.' },
+    { id:'c06', zone:'Wohnung', x: 90, y: 300, title:'Warnzettel', desc:'"Er weiß Bescheid. Lass dich heute nicht sehen."' }
+  ];
+  // Nachtmarkt (6)
+  const markt = [
+    { id:'c07', zone:'Nachtmarkt', x: 520, y: 80, title:'Händlerinfo', desc:'Old Rocco: "Sie suchte alte Register. Sehr nervös."' },
+    { id:'c08', zone:'Nachtmarkt', x: 460, y: 190, title:'Parkkamera', desc:'Zeitstempel: 20:48 — Linas Auto.' },
+    { id:'c09', zone:'Nachtmarkt', x: 620, y: 200, title:'Kaffeedose', desc:'Linas Fingerabdruck gefunden.' },
+    { id:'c10', zone:'Nachtmarkt', x: 560, y: 240, title:'Zeugin', desc:'Kellnerin: "Sie stritt mit einem Mann im grauen Mantel."' },
+    { id:'c11', zone:'Nachtmarkt', x: 700, y: 160, title:'Blauer Stift', desc:'Tinte passt zum Zettel "17B".' },
+    { id:'c12', zone:'Nachtmarkt', x: 620, y: 120, title:'Musik-Notiz', desc:'Straßenmusiker spielt ein Jazz-Lied wie im Club.' }
+  ];
+  // Jazz-Club (5)
+  const club = [
+    { id:'c13', zone:'JazzClub', x: 1140, y: 240, title:'Barkeeper-Notiz', desc:'Lina sprach mit einem "Archivar oder so".' },
+    { id:'c14', zone:'JazzClub', x: 1180, y: 320, title:'Notizzettel Bühne', desc:'"Vorsicht. Jemand folgt mir."' },
+    { id:'c15', zone:'JazzClub', x: 1200, y: 220, title:'Fotoautomat', desc:'Lina mit Mann im grauen Mantel. Archivkarte sichtbar.' },
+    { id:'c16', zone:'JazzClub', x: 1100, y: 360, title:'Safe-Mappe', desc:'"Blue Trace – Klassifiziert" (B17 dreifach unterstrichen).' },
+    { id:'c17', zone:'JazzClub', x: 1230, y: 300, title:'Amara', desc:'Jazz-Sängerin: "Sie hat etwas gefunden."' }
+  ];
+  // Archiv (5)
+  const archiv = [
+    { id:'c18', zone:'Archiv', x: 1700, y: 80, title:'Registratur-Notiz', desc:'Randnotiz: "Trasse 17B".' },
+    { id:'c19', zone:'Archiv', x: 1760, y: 160, title:'Computerlog', desc:'Letzter Zugriff: Gestern 18:12 — Blue Trace Akte gesperrt.' },
+    { id:'c20', zone:'Archiv', x: 1640, y: 200, title:'Herr Brunnert', desc:'Kollege: "Sie stieß auf eine geheime Wasserstudie."' },
+    { id:'c21', zone:'Archiv', x: 1830, y: 120, title:'Aufzugsschacht', desc:'Kratzer an der Wand, Stück Stoff von Linas Mantel.' },
+    { id:'c22', zone:'Archiv', x: 1720, y: 250, title:'Unterirdische Karte', desc:'Ein Plan, der in die Untergrundanlage zeigt.' }
+  ];
+  // Untergrund (5)
+  const underground = [
+    { id:'c23', zone:'Untergrund', x: 2340, y: 240, title:'Laborprotokoll', desc:'Wasserproben zeigen blaues Leuchten.' },
+    { id:'c24', zone:'Untergrund', x: 2420, y: 300, title:'Forscher-Tagebuch', desc:'"Das Projekt wurde gestoppt — jemand setzte es fort."' },
+    { id:'c25', zone:'Untergrund', x: 2300, y: 340, title:'Kampfspuren', desc:'Zerbrochene Schutzbrille & Blutspuren.' },
+    { id:'c26', zone:'Untergrund', x: 2380, y: 220, title:'Verschlüsselte Datei', desc:'"Lina wusste es. Ich musste handeln – G."' },
+    { id:'c27', zone:'Untergrund', x: 2400, y: 360, title:'Schlüsselkarte', desc:'"Archiv — Sicherheitsstufe Grau".' }
+  ];
+  // Finale (3) - extra final pieces
+  const finale = [
+    { id:'c28', zone:'Finale', x: 2950, y: 180, title:'Letztes Foto', desc:'Lina gefesselt — aufgenommen kurz vorher.' },
+    { id:'c29', zone:'Finale', x: 3050, y: 360, title:'Gerrits Notiz', desc:'"Ich konnte es nicht anders — das Projekt muss weiterlaufen."' },
+    { id:'c30', zone:'Finale', x: 2900, y: 420, title:'Freiheits-Faden', desc:'Ein Stofffetzen mit Linas Parfumduft.' }
+  ];
+
+  for (const a of [wohnung, markt, club, archiv, underground, finale]) {
+    for (const item of a) list.push(item);
+  }
+  return list;
+};
+
+/* Create NPCs data (name, x,y, zone, dialogues) */
+MainScene.prototype.createNPCs = function() {
+  return [
+    { id:'n01', name:'Mira (Schwester)', x: 90, y: 220, zone:'Wohnung', lines: ['Danke, dass du gekommen bist.', 'Bitte finde Lina.'] },
+    { id:'n02', name:'Old Rocco', x: 500, y: 160, zone:'Nachtmarkt', lines: ['Sie suchte alte Register.', 'War sehr nervös.'] },
+    { id:'n03', name:'Kellnerin', x: 560, y: 240, zone:'Nachtmarkt', lines: ['Sie stritt mit einem Mann im grauen Mantel.', 'Er schien bekannt zu sein.'] },
+    { id:'n04', name:'Straßenmusiker', x: 620, y: 120, zone:'Nachtmarkt', lines: ['Ich hab das Jazz-Stück auch im Club gehört.', 'Vielleicht weiß die Sängerin mehr.'] },
+    { id:'n05', name:'Barkeeper', x: 1160, y: 240, zone:'JazzClub', lines: ['Sie sprach mit jemandem aus dem Archiv.', 'Er trug eine Karte sichtbar am Gürtel.'] },
+    { id:'n06', name:'Amara (Sängerin)', x: 1220, y: 300, zone:'JazzClub', lines: ['Lina war meine Freundin.', 'Sie hat etwas herausgefunden, sie wollte es veröffentlichen.'] },
+    { id:'n07', name:'Herr Brunnert', x: 1760, y: 200, zone:'Archiv', lines: ['Ich wollte sie warnen.', 'Das Projekt ist gefährlich.'] },
+    { id:'n08', name:'Wächter Untergrund', x: 2400, y: 320, zone:'Untergrund', lines: ['Hier unten lief etwas schief.', 'Jemand hat Spuren verwischt.'] },
+    { id:'n09', name:'Gerrit Weller', x: 3000, y: 220, zone:'Finale', lines: ['Du wirst mich nicht aufhalten!', 'Das Projekt... muss fortgeführt werden.'] }
+  ];
+};
+
+/* Show speech bubble helper */
+MainScene.prototype.showSpeech = function(text, duration=2500) {
+  this.bubble.removeAll(true);
+  const padding = 12;
+  const txt = this.add.text(0,0, text, { fontSize:'16px', color:'#07121a', wordWrap:{ width:360 } });
+  const w = txt.width + padding*2, h = txt.height + padding*2;
+  const bg = this.add.graphics();
+  bg.fillStyle(0xf8f9fa,1).fillRoundedRect(-w/2, -h - 22, w, h, 8);
+  bg.lineStyle(2,0x07121a).strokeRoundedRect(-w/2, -h - 22, w, h, 8);
+  bg.fillTriangle(-10, -22, 10, -22, 0, -8);
+  txt.setOrigin(0.5,1);
+  this.bubble.add([bg, txt]);
+  this.bubble.setVisible(true);
+  this.bubble.x = this.player.x;
+  this.bubble.y = this.player.y - (this.mode==='top'?40:80);
+  if (this.bubbleTimer) this.time.removeEvent(this.bubbleTimer);
+  this.bubbleTimer = this.time.addEvent({ delay: duration, callback: ()=>{ this.bubble.setVisible(false); }});
+};
+
+/* Toggle inventory DOM */
+MainScene.prototype.toggleInventory = function() {
+  if (this.notesPanel.style.display === 'block') {
+    this.notesPanel.style.display = 'none';
+  } else {
+    this.notesPanel.style.display = 'block';
+    // Populate list
+    this.cluesListDiv.innerHTML = '';
+    for (const c of this.clues) {
+      const el = document.createElement('div');
+      el.className = 'clue-item';
+      el.textContent = `${c.title} ${this.collected[c.id] ? '✔' : ''}`;
+      el.onclick = () => { alert(`${c.title}\n\n${c.desc}`); };
+      this.cluesListDiv.appendChild(el);
+    }
+  }
+};
+
+/* Update loop */
+MainScene.prototype.update = function(time, delta) {
+  // Movement logic based on mode
+  if (this.mode === 'top') {
+    // top-down movement (no gravity)
+    this.player.body.setAllowGravity(false);
+    const speed = 190;
+    let vx = 0, vy = 0;
+    if (this.cursors.left.isDown) vx = -speed;
+    else if (this.cursors.right.isDown) vx = speed;
+    if (this.cursors.up.isDown) vy = -speed;
+    else if (this.cursors.down.isDown) vy = speed;
+    this.player.setVelocity(vx, vy);
+  } else {
+    // side-scroller movement
+    this.player.body.setAllowGravity(true);
+    const speed = 180;
+    if (this.cursors.left.isDown) this.player.setVelocityX(-speed);
+    else if (this.cursors.right.isDown) this.player.setVelocityX(speed);
+    else this.player.setVelocityX(0);
+    if (this.cursors.up.isDown && this.player.body.onFloor()) this.player.setVelocityY(-420);
+  }
+
+  // Keep speech bubble position
+  if (this.bubble.visible) {
+    this.bubble.x = this.player.x;
+    this.bubble.y = this.player.y - (this.mode==='top'?40:80);
+  }
+
+  // Check which zone player is in
+  for (const [name,z] of Object.entries(this.zones)) {
+    const left = z.x - z.w/2, right = z.x + z.w/2, top = z.y - z.h/2, bottom = z.y + z.h/2;
+    if (this.player.x >= left && this.player.x <= right && this.player.y >= top && this.player.y <= bottom) {
+      if (this.currentZone !== name) {
+        this.currentZone = name;
+        this.locationText.setText(`Ort: ${name}`);
+        this.applyModeForZone(name);
+      }
+    }
+  }
+
+  // Reset small dynamic hints
+  this.hintText.setText('');
+
+  // Interactions: Space key
+  if (Phaser.Input.Keyboard.JustDown(this.keySpace)) {
+    // NPC interaction (if nearNPC set)
+    if (this.nearNPC) {
+      const meta = this.nearNPC.getData('meta');
+      this.showSpeech(meta.lines[Math.floor(Math.random()*meta.lines.length)], 2800);
+      return;
+    }
+    // Clue pickup check: find nearest visible clue within radius
+    let picked = false;
+    for (const c of this.clues) {
+      if (this.collected[c.id]) continue;
+      const dx = Phaser.Math.Distance.Between(this.player.x,this.player.y, c.x,c.y);
+      if (dx < 60 && this.isInSameZone(c.zone)) {
+        this.collectClue(c);
+        picked = true;
+        break;
+      }
+    }
+    if (picked) return;
+
+    // Final door interaction
+    if (this.nearFinal) {
+      const locked = this.finalDoor.getData('isLocked');
+      if (locked) {
+        if (this.cluesFound >= this.requiredClues) {
+          this.finalDoor.setData('isLocked', false);
+          this.showSpeech("Du hast alle Hinweise! Die Tür öffnet sich...", 3000);
+          // reveal Lina (safe) and trigger final sequence
+          this.time.delayedCall(1200, ()=>{ this.revealFinalScene(); });
+        } else {
+          this.showSpeech("Die Tür ist verschlossen. Es fehlen Hinweise.", 2200);
+        }
+      } else {
+        // door already unlocked - immediate final
+        this.revealFinalScene();
+      }
+      return;
+    }
+
+    // default: no interaction hint
+    this.showSpeech("Nichts zu tun.", 1400);
+  }
+
+  // Mode switch: E to force switch if zone allows switching
+  if (Phaser.Input.Keyboard.JustDown(this.keyE)) {
+    // determine allowed switch in certain zones (Wohnung, JazzClub, Untergrund, Finale are side; Nachtmarkt & Archiv top)
+    // Only allow switch if target mode differs from zone mode
+    const targetMode = this.zones[this.currentZone].mode;
+    if (this.mode !== targetMode) {
+      this.switchToMode(targetMode);
+      this.showSpeech(`Wechsel zur ${targetMode==='top'?'Vogelperspektive':'Seitenansicht'}`, 1400);
+    } else {
+      this.showSpeech('Hier ist kein Perspektivwechsel möglich.', 1200);
+    }
+  }
+};
+
+/* Check if clue zone equals player's zone */
+MainScene.prototype.isInSameZone = function(zoneName) {
+  return zoneName === this.currentZone;
+};
+
+/* Collect clue */
+MainScene.prototype.collectClue = function(clue) {
+  if (this.collected[clue.id]) return;
+  this.collected[clue.id] = true;
+  this.cluesFound++;
+  // hide sprite
+  const sprite = this.clueSprites[clue.id];
+  if (sprite) sprite.setVisible(false);
+  this.clueCounter.setText(`Hinweise: ${this.cluesFound}/${this.requiredClues}`);
+  this.showSpeech(`Hinweis gesammelt: ${clue.title}`, 1600);
+  // Auto-open inventory briefly if many clues found
+  if (this.cluesFound % 6 === 0) this.toggleInventory();
+};
+
+/* Apply mode for zone (set physics / visibility) */
+MainScene.prototype.applyModeForZone = function(zoneName) {
+  const mode = this.zones[zoneName].mode;
+  this.switchToMode(mode);
+};
+
+/* Switch mode helper */
+MainScene.prototype.switchToMode = function(mode) {
+  if (mode === this.mode) return;
+  this.mode = mode;
+  if (mode === 'top') {
+    // top-mode: no gravity, show top visuals (we use same placeholders)
+    this.player.setTexture('player_top');
+    this.player.body.setSize(36,36,true);
+    this.player.setVelocity(0,0);
+    // disable platform collisions
+    this.physics.world.colliders.each((c) => {
+      if (c.object2 === this.platforms) c.destroy();
+    });
+  } else {
+    // side mode
+    this.player.setTexture('player_side');
+    this.player.body.setSize(30,50,true);
+    // enable collisions with platforms
+    this.physics.add.collider(this.player, this.platforms);
+  }
+};
+
+/* Reveal final scene and ending */
+MainScene.prototype.revealFinalScene = function() {
+  // spawn Lina near final door (free her)
+  if (this.linaRescued) {
+    this.showSpeech("Lina ist bereits in Sicherheit.", 1800);
+    return;
+  }
+  this.linaRescued = true;
+  const final = this.zones['Finale'];
+  this.lina = this.add.sprite(final.x + final.w/2 - 40, final.y + final.h/2 + 10, 'npc').setScale(1);
+  this.showSpeech("Du hast Lina gefunden! Der Fall ist gelöst — doch Neonstadt hat weitere Geheimnisse...", 5200);
+  // optional: disable Gerrit NPC or trigger final dialogue
+  // spawn Gerrit (enemy) and short tension
+  const gerrit = this.add.sprite(final.x + final.w/2 + 120, final.y + final.h/2 - 20, 'npc');
+  this.time.delayedCall(3000, ()=> {
+    this.showSpeech("Gerrit floh... Die Akten sind nun öffentlich. Gute Arbeit.", 4200);
+  });
+};
+
+/* End of MainScene */
+</script>
+</body>
+</html>
